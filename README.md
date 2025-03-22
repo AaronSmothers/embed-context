@@ -1,18 +1,15 @@
 # Rust Embeddings
 
-> **⚠️ IMPORTANT NOTE:** The release build currently has issues with libtorch library paths. When building with `--release`, you may encounter errors like `Library not loaded: @rpath/libtorch_cpu.dylib` due to missing LC_RPATH entries. For now, use debug builds with `cargo run` which properly sets up the library paths. This issue will be addressed in future releases.
+A robust, pure Rust implementation of text embedding algorithms optimized for Apple Silicon M-series chips, using the all-MiniLM-L6-v2 model from Hugging Face.
 
-A pure Rust implementation of text embedding algorithms using the all-MiniLM-L6-v2 model from Hugging Face.
-
-This is being built for us in Apple M architecture. Currently all M architecture from M1 forward is supported.
 ## Features
 
-- Integrates the all-MiniLM-L6-v2 model using rust-bert
-- Real embeddings with 384 dimensions that capture semantic meaning
-- Efficient storage using Protocol Buffers
-- Simple interface for embedding text and computing similarity
-- Optimized for large-scale embedding tasks (supports processing 100GB+ datasets)
-- Command-line interface for easy usage
+- **Apple Silicon Optimization**: Fully leverages Apple M-series chips (M1, M2, M3, M4) with Metal Performance Shaders (MPS) acceleration
+- **High-quality Semantic Embeddings**: Uses the all-MiniLM-L6-v2 model to generate 384-dimensional embeddings that capture semantic meaning
+- **Streamlined Model Management**: Automatically downloads and caches model files for future use
+- **Efficient Storage**: Compact embedding storage using Protocol Buffers
+- **Fast Parallel Processing**: Optimized for large-scale embedding tasks with rayon parallelization (needs significantly larger tests and performance profiling*)
+- **Intuitive CLI**: Simple command-line interface for embedding texts and computing similarity
 
 ## Installation
 
@@ -20,10 +17,10 @@ Add this to your Cargo.toml:
 
 ```toml
 [dependencies]
-rust_embed = "0.0.1"
+rust_embed = "0.0.2"
 ```
 
-Note: This package requires libtorch (PyTorch C++ libraries) to be installed as it uses the tch-rs crate.
+The package automatically handles downloading and configuring the necessary dependencies, including libtorch libraries optimized for your system architecture. Note that on Apple Silicon, only the arm64 version of libtorch is used for optimal performance.
 
 ## Usage
 
@@ -51,9 +48,8 @@ fn main() -> Result<()> {
     // Create the embedder
     let mut embedder = MiniLMEmbedder::new();
     
-    // Load necessary components
-    embedder.load_or_download_tokenizer()?;
-    embedder.load_or_download_model()?;
+    // Initialize the model (downloads/loads model and tokenizer automatically)
+    embedder.initialize()?;
     
     // Embed a text
     let text = "This is a sample text to embed";
@@ -70,36 +66,56 @@ fn main() -> Result<()> {
 }
 ```
 
+## Apple Silicon Optimizations
+
+This library is specially optimized for Apple Silicon chips:
+
+- **Unified Memory Utilization**: Leverages the unified memory architecture of M-series chips
+- **MPS Acceleration**: Uses Metal Performance Shaders for accelerated tensor operations
+- **Automatic Detection**: Automatically detects and configures for your hardware
+- **Parallel Processing**: Uses rayon to take advantage of multi-core performance when appropriate
+
 ## Project Structure
 
-- `src/embedding.rs`: Core embedding trait definition
-- `src/models/mini_lm/`: Implementation of the all-MiniLM-L6-v2 model
-- `src/utils.rs`: Utility functions for saving/loading embeddings
-- `proto/embeddings.proto`: Protocol Buffers schema for storing embeddings
-- `src/bin/`: Command-line tools for embedding and similarity
+- `src/embedding.rs`: Core embedding trait definition and functionality
+- `src/models/mini_lm/mod.rs`: Implementation of the all-MiniLM-L6-v2 model with Apple Silicon optimizations
+- `src/utils/mod.rs`: Utility functions for saving/loading embeddings and Apple Silicon configuration
+- `src/bin/`: Command-line tools for embedding and similarity calculations
+- `proto/embeddings.proto`: Protocol Buffers schema for storing embeddings efficiently
 
 ## Performance
 
-This implementation is designed to be efficient for large-scale embedding tasks. For a 106GB dataset, it uses Protocol Buffers to minimize storage requirements and maximize serialization/deserialization speed.
+This implementation is designed for both speed and efficiency:
+
+- For large datasets (100GB+), embeddings are generated using parallel processing
+- On Apple Silicon M-series chips, performance is significantly improved using MPS acceleration which gives us GPU acceleration (profiling CPU vs GPU vs Neural engine core usage coming soon)
+- Embedding caching prevents redundant processing of identical texts
 
 ## Dependencies
 
-- rust-bert: Provides the all-MiniLM-L6-v2 model implementation
-- tch: Rust bindings for the PyTorch C++ API
-- tokenizers: High-performance tokenization from Hugging Face
-- ndarray: N-dimensional array manipulation
-- prost: Protocol Buffers implementation for Rust
+- **rust-bert**: Rust implementation of transformer models including all-MiniLM-L6-v2
+- **tch**: Rust bindings for PyTorch C++ API with MPS support
+- **ndarray**: N-dimensional array for fast vector operations
+- **rayon**: Data parallelism library for multi-core processing
+- **prost**: Efficient Protocol Buffers implementation
 
-## Future Improvements
+## Completed Improvements
 
-- [x] ~~Implement true MiniLM model weights loading~~
+- [x] Implement true MiniLM model weights loading via rust-bert
+- [x] Optimize for Apple Silicon with Metal Performance Shaders
+- [x] Add streamlined tokenizer loading process
+- [x] Implement automatic hardware detection and configuration
+- [x] Optimize for parallel processing with rayon
+- [x] Add model caching to avoid reloading for each run
+
+## Future Roadmap
+
 - [ ] Add support for more embedding models
-- [ ] Optimize for parallel processing
-- [ ] Add benchmarking tools
-- [ ] Implement retrieval functionality for similarity search
-- [ ] Improve error handling and reporting
-- [ ] Add model caching to avoid reloading for each run
-- [ ] Fix release build issues with libtorch library paths
+- [ ] Implement vector database integration for efficient similarity search
+- [ ] Add benchmarking tools and performance profiling
+- [ ] Expose the libtorch binary for use by a future inference package
+- [ ] Improve documentation with more usage examples
+
 
 ## License
 
