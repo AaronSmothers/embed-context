@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
 use rust_embed::{
-    embedding::Embedder,
     models::mini_lm::MiniLMEmbedder,
     utils,
 };
@@ -39,13 +38,13 @@ fn main() -> Result<()> {
     // Create the MiniLM embedder
     let mut embedder = MiniLMEmbedder::new();
     
-    // Load the tokenizer and model
-    println!("Loading tokenizer...");
-    embedder.load_or_download_tokenizer()?;
+    // Initialize the model and tokenizer
+    println!("Initializing the embedder...");
+    embedder.initialize()?;
     
-    println!("Loading model...");
-    embedder.load_or_download_model()?;
-    println!("Using the all-MiniLM-L6-v2 model for generating embeddings.");
+    // Output info about the model
+    println!("Using the {} model for generating embeddings.", embedder.model_name());
+    println!("Embedding dimension: {}", embedder.dimension());
     
     // Embed the input text
     println!("Embedding text: {}", args.text);
