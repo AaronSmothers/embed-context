@@ -4,6 +4,7 @@
 
 A pure Rust implementation of text embedding algorithms using the all-MiniLM-L6-v2 model from Hugging Face.
 
+This is being built for us in Apple M architecture. Currently all M architecture from M1 forward is supported.
 ## Features
 
 - Integrates the all-MiniLM-L6-v2 model using rust-bert
