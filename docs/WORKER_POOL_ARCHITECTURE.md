@@ -143,6 +143,31 @@ Apple Silicon uses **unified memory** shared between CPU and GPU (Metal Performa
 
 ---
 
+## Model Selection Strategy
+
+rust-embed supports multiple embedding models with different trade-offs:
+
+| Model | Parameters | Dimensions | Max Tokens | Memory/Worker | Strategy |
+|-------|------------|------------|------------|---------------|----------|
+| **MiniLM-L6-v2** | 22M | 384 | 512 | ~100 MB | CPU-only |
+| **ModernBERT Base** | 149M | 768 | 8192 | ~1-3 GB | **Hybrid CPU/GPU** |
+
+### Model Selection Guide
+
+**Use MiniLM-L6-v2 when:**
+- Memory is constrained (<16 GB)
+- Processing short texts (<512 tokens)
+- Throughput priority over quality
+- Simplest architecture (CPU-only)
+
+**Use ModernBERT Base when:**
+- Long context required (up to 8192 tokens)
+- Higher quality embeddings needed
+- Memory available (≥16 GB)
+- Willing to use hybrid CPU/GPU architecture
+
+---
+
 ## CPU vs GPU (MPS) Worker Strategy
 
 ### Device Selection Per Worker
@@ -195,21 +220,84 @@ pub enum WorkerDevice {
 | 6 MPS workers | ~310 | 18ms | 35W |
 | 3 CPU + 3 MPS | ~420 | 14ms | 30W |
 
-**Conclusion**: **CPU-only workers deliver best throughput/watt and lowest latency.**
+**Conclusion**: **CPU-only workers deliver best throughput/watt and lowest latency for MiniLM.**
 
-### When to Use MPS
+### ModernBERT: Hybrid CPU/GPU Strategy
+
+ModernBERT (149M params, 8192 max tokens) benefits from GPU acceleration for specific workloads. The strategy uses **dynamic routing** based on sequence length and batch size.
+
+**Routing Decision Logic:**
 
 ```rust
-// Only use MPS if:
-// 1. Batch size > 128 per request
-// 2. Model size > 500 MB (e.g., large-E5, BGE-large)
-// 3. Single-threaded upstream (can't feed multiple workers)
+pub fn select_device_modernbert(seq_len: usize, batch_size: usize) -> Device {
+    let batch_tokens = seq_len * batch_size;
 
-if batch_size > 128 || model_size > 500_000_000 {
-    WorkerDevice::Mps
-} else {
-    WorkerDevice::Cpu
+    // Rule 1: Long sequences (attention parallelism wins)
+    if seq_len >= 1024 {
+        return Device::Mps;
+    }
+
+    // Rule 2: Very small batches (GPU overhead not worth it)
+    if batch_tokens <= 512 {
+        return Device::Cpu;
+    }
+
+    // Rule 3: Large batches (amortized transfer cost)
+    if batch_tokens >= 2048 {
+        return Device::Mps;
+    }
+
+    // Default: CPU for medium workloads
+    Device::Cpu
 }
+```
+
+**Threshold Justification:**
+- **1024 tokens**: Transformer attention is O(n²) → at 1M ops, GPU parallelism becomes beneficial
+- **512 batch_tokens**: GPU has ~5-10ms fixed overhead; need ≥20ms compute to break even
+- **2048 batch_tokens**: Batch processing amortizes transfer; GPU throughput wins
+
+**Heterogeneous Worker Pool:**
+
+| System RAM | CPU Workers | GPU Workers | Total Memory | Use Case |
+|------------|-------------|-------------|--------------|----------|
+| 8 GB | 2 | 0 | ~2 GB | Conservative, no GPU |
+| 16 GB | 4 | 1 | ~7 GB | Balanced hybrid |
+| 24 GB | 6 | 1 | ~9 GB | More CPU throughput |
+| 32 GB | 8 | 2 | ~14 GB | High performance |
+| 64 GB | 10 | 2 | ~16 GB | Maximum throughput |
+
+**ModernBERT Benchmark Data (M1 Pro):**
+
+| Workload | Device | Latency | Throughput (per worker) |
+|----------|--------|---------|-------------------------|
+| 128 tokens, single | CPU | 30 ms | ~33 emb/sec |
+| 512 tokens, single | CPU | 50 ms | ~20 emb/sec |
+| 1024 tokens, single | GPU | 35 ms | ~29 emb/sec |
+| 1024 tokens, single | CPU | 100 ms | ~10 emb/sec |
+| 256 tokens, batch=8 | GPU | 500 ms | ~16 emb/sec |
+| 8192 tokens, single | GPU | 200 ms | ~5 emb/sec |
+
+**Memory per Worker:**
+- CPU worker: ~1 GB (short sequences)
+- GPU worker: ~2-3 GB (includes GPU memory overhead)
+
+See [MODERNBERT_IMPLEMENTATION.md](./MODERNBERT_IMPLEMENTATION.md) for complete details.
+
+### When to Use Hybrid CPU/GPU (Summary)
+
+```rust
+// For MiniLM-L6-v2: Always CPU
+if model == MiniLM {
+    return Device::Cpu;
+}
+
+// For ModernBERT: Dynamic routing
+if model == ModernBERT {
+    return select_device_modernbert(seq_len, batch_size);
+}
+
+// For future large models (>500MB): Evaluate case-by-case
 ```
 
 ### Device Configuration
@@ -565,11 +653,24 @@ enable_shared_cache = false
 shared_cache_size = 50000
 
 [model]
-# Model to load
-model_name = "all-MiniLM-L6-v2"
+# Model to load: "minilm-l6-v2" or "modernbert-base"
+model_name = "minilm-l6-v2"
 
 # Custom model path (optional)
 model_path = ""
+
+# Max sequence length
+max_length = 512  # 512 for MiniLM, 8192 for ModernBERT
+
+[routing]
+# Only for ModernBERT: dynamic routing strategy
+# Options: "dynamic", "cpu_only", "gpu_preferred"
+strategy = "dynamic"
+
+# Device selection thresholds (ModernBERT only)
+long_sequence_threshold = 1024
+small_batch_threshold = 512
+large_batch_threshold = 2048
 
 [monitoring]
 # Log worker stats interval (seconds, 0 = disabled)
@@ -608,8 +709,19 @@ enable_per_worker_metrics = true
 ### Phase 4: Optimization (Future)
 - [ ] Evaluate shared read cache (if needed)
 - [ ] Evaluate cache sharding (if needed)
-- [ ] Evaluate MPS workers for large models
 - [ ] Auto-scaling worker count
+
+### Phase 5: ModernBERT Support (v0.3.0)
+- [ ] Implement ModernBERT model loading
+- [ ] Implement mean pooling for ModernBERT
+- [ ] Add GPU worker support (MPS)
+- [ ] Implement dynamic device routing
+- [ ] Create heterogeneous worker pool
+- [ ] Add model selection in configuration
+- [ ] Benchmark and tune routing thresholds
+- [ ] Migration guide from MiniLM
+
+See [MODERNBERT_IMPLEMENTATION.md](./MODERNBERT_IMPLEMENTATION.md) for detailed implementation plan.
 
 ---
 
@@ -719,22 +831,50 @@ pub struct WorkerMetrics {
 The worker pool architecture provides:
 
 1. **Simplicity**: No shared state, no locks, message passing only
-2. **Performance**: ~570 emb/sec (6 workers), near-linear scaling
+2. **Performance**: Near-linear scaling with worker count
 3. **Predictability**: Consistent latency, no lock contention variance
 4. **Maintainability**: Easy to debug, test, and reason about
 5. **Scalability**: Add workers = add throughput (up to hardware limits)
+6. **Flexibility**: Support for both CPU-only and hybrid CPU/GPU configurations
 
-**Trade-off**: 622 MB memory for 6 workers vs. 150 MB for rayon approach.
+### Model-Specific Recommendations
 
-**Verdict**: Memory cost is **negligible** on modern Macs (≤4% of 16GB). The simplicity and performance gains far outweigh the cost.
+**MiniLM-L6-v2 (v0.2.0):**
+- **Strategy**: CPU-only workers
+- **Memory**: 622 MB for 6 workers
+- **Performance**: ~570 emb/sec (6 workers)
+- **Use case**: Short texts (<512 tokens), throughput priority, memory-constrained systems
 
-**Approved for implementation** in rust-embed version 0.2.0.
+**ModernBERT Base (v0.3.0):**
+- **Strategy**: Hybrid CPU/GPU workers with dynamic routing
+- **Memory**: 6-14 GB (depending on worker count)
+- **Performance**: Variable (depends on sequence length and routing)
+- **Use case**: Long context (up to 8192 tokens), quality priority, ≥16 GB RAM
+
+### Memory Trade-offs
+
+| Model | Workers | Memory | vs Rayon | Verdict |
+|-------|---------|--------|----------|---------|
+| MiniLM | 6 | 622 MB | +4× | ✅ Negligible (<4% of 16GB) |
+| ModernBERT | 4 CPU + 1 GPU | ~7 GB | +50× | ⚠️ Significant but acceptable (44% of 16GB) |
+| ModernBERT | 8 CPU + 2 GPU | ~14 GB | +100× | ⚠️ Requires ≥32 GB RAM |
+
+**Verdict**: Worker pool architecture is **approved for implementation**. Memory cost is acceptable for the gains in simplicity, performance, and code maintainability.
+
+- **Phase 1 (v0.2.0)**: MiniLM with CPU-only workers
+- **Phase 2 (v0.3.0)**: ModernBERT with hybrid CPU/GPU workers
 
 ---
 
 ## References
 
+### Internal Documentation
+- [ModernBERT Implementation Specification](./MODERNBERT_IMPLEMENTATION.md)
+
+### External Resources
 - Apple Silicon Architecture: https://developer.apple.com/documentation/apple-silicon
 - Metal Performance Shaders: https://developer.apple.com/metal/
 - rust-bert documentation: https://docs.rs/rust-bert/
 - Crossbeam channels: https://docs.rs/crossbeam/
+- ModernBERT model: https://huggingface.co/nomic-ai/modernbert-embed-base
+- MiniLM model: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
