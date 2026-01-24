@@ -36,8 +36,9 @@ struct Args {
     #[arg(short, long, default_value = "0")]
     workers: usize,
 
-    /// Cache size per worker
-    #[arg(short, long, default_value = "5000")]
+    /// Cache size per worker (0 = disabled, 100 = minimal, 10000 = large for search queries)
+    /// For unique message streams, use 0 to disable caching entirely
+    #[arg(short, long, default_value = "0")]
     cache_size: usize,
 }
 

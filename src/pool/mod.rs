@@ -62,7 +62,26 @@ pub struct PoolConfig {
     /// Model to use
     pub model: ModelType,
 
-    /// Cache size per worker (number of embeddings)
+    /// Cache size per worker (number of embeddings to cache)
+    ///
+    /// **Cache Behavior:**
+    /// - `0`: Disable caching entirely (recommended for unique message streams)
+    /// - `100-500`: Minimal cache for catching duplicate messages
+    /// - `1000-5000`: Moderate cache for mixed workloads
+    /// - `10000+`: Large cache for high-repetition workloads (search queries)
+    ///
+    /// **When to use caching:**
+    /// - Search query systems: Users repeat common searches → HIGH cache value
+    /// - Recommendation systems: Same items embedded repeatedly → HIGH cache value
+    /// - Real-time APIs: Common phrases appear frequently → MODERATE cache value
+    ///
+    /// **When to disable caching (set to 0):**
+    /// - Document embedding pipelines: Each message is unique → NO cache value
+    /// - Stream processing: Unique events/logs → NO cache value
+    /// - Batch ETL: One-time dataset embedding → NO cache value
+    ///
+    /// For rust-embed's primary use case (embedding unique messages from upstream),
+    /// consider setting this to `0` or a small value (100-500) to catch accidental duplicates.
     pub cache_size_per_worker: usize,
 
     /// Optional routing configuration for CPU/GPU selection (ModernBERT only)
@@ -72,35 +91,50 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    /// Create a minimal configuration (1 CPU worker)
+    /// Create a minimal configuration (1 CPU worker, no caching)
+    /// Suitable for low-throughput unique message streams
     pub fn minimal() -> Self {
         Self {
             cpu_workers: 1,
             gpu_workers: 0,
             model: ModelType::MiniLM,
-            cache_size_per_worker: 2000,
+            cache_size_per_worker: 0,  // No cache for unique messages
             routing_config: None,
         }
     }
 
-    /// Create a balanced configuration (4 CPU workers)
+    /// Create a balanced configuration (4 CPU workers, minimal cache)
+    /// Suitable for document embedding pipelines with moderate throughput
     pub fn balanced() -> Self {
         Self {
             cpu_workers: 4,
             gpu_workers: 0,
             model: ModelType::MiniLM,
-            cache_size_per_worker: 5000,
+            cache_size_per_worker: 100,  // Small cache to catch duplicates
             routing_config: None,
         }
     }
 
-    /// Create a high-throughput configuration (8 CPU workers)
+    /// Create a high-throughput configuration (8 CPU workers, minimal cache)
+    /// Suitable for high-volume document embedding pipelines
     pub fn high_throughput() -> Self {
         Self {
             cpu_workers: 8,
             gpu_workers: 0,
             model: ModelType::MiniLM,
-            cache_size_per_worker: 5000,
+            cache_size_per_worker: 100,  // Small cache to catch duplicates
+            routing_config: None,
+        }
+    }
+
+    /// Create configuration optimized for search queries (4 CPU workers, large cache)
+    /// Suitable for systems where users repeat common searches
+    pub fn search_optimized() -> Self {
+        Self {
+            cpu_workers: 4,
+            gpu_workers: 0,
+            model: ModelType::MiniLM,
+            cache_size_per_worker: 10_000,  // Large cache for repeated queries
             routing_config: None,
         }
     }
@@ -524,21 +558,18 @@ pub fn suggest_pool_config() -> PoolSuggestion {
         ((num_cpus * 3) / 4).max(1).min(8)
     };
 
-    let cache_size = if available_ram_gb >= 16 {
-        5000
-    } else if available_ram_gb >= 8 {
-        3000
-    } else {
-        2000
-    };
+    // For document embedding pipelines (primary use case), use minimal cache
+    // Caller should increase if they have high-repetition workloads (search queries)
+    let cache_size = 100;  // Small cache to catch accidental duplicates
 
     PoolSuggestion {
         cpu_workers: suggested_cpu,
         gpu_workers: 0, // Phase 1: No GPU support yet
         cache_size_per_worker: cache_size,
         note: format!(
-            "Suggestion based on {} CPUs and ~{} GB RAM. Caller should adjust based on their specific needs.",
-            num_cpus, available_ram_gb
+            "Suggestion based on {} CPUs and ~{} GB RAM. Cache set to {} for document embedding. \
+             Increase to 10000+ for search query workloads. Set to 0 to disable caching.",
+            num_cpus, available_ram_gb, cache_size
         ),
     }
 }
@@ -649,12 +680,32 @@ mod tests {
     fn test_pool_config_presets() {
         let minimal = PoolConfig::minimal();
         assert_eq!(minimal.cpu_workers, 1);
+        assert_eq!(minimal.cache_size_per_worker, 0);  // No cache for unique messages
 
         let balanced = PoolConfig::balanced();
         assert_eq!(balanced.cpu_workers, 4);
+        assert_eq!(balanced.cache_size_per_worker, 100);  // Small cache to catch duplicates
 
         let high = PoolConfig::high_throughput();
         assert_eq!(high.cpu_workers, 8);
+        assert_eq!(high.cache_size_per_worker, 100);  // Small cache to catch duplicates
+
+        let search = PoolConfig::search_optimized();
+        assert_eq!(search.cpu_workers, 4);
+        assert_eq!(search.cache_size_per_worker, 10_000);  // Large cache for repeated queries
+    }
+
+    #[test]
+    fn test_cache_disabled_config() {
+        // Valid: cache_size_per_worker = 0 (cache disabled)
+        let config = PoolConfig {
+            cpu_workers: 4,
+            gpu_workers: 0,
+            model: ModelType::MiniLM,
+            cache_size_per_worker: 0,  // Disabled cache
+            routing_config: None,
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]
