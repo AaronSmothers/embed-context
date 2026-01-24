@@ -1,5 +1,5 @@
 # ModernBERT Embedding Model Implementation
-**rust-embed v0.2.0**
+**rust-embed v0.2.1 / v0.3.0**
 **Model:** nomic-ai/modernbert-embed-base
 **Date:** 2026-01-24
 **Status:** Planning
@@ -8,14 +8,106 @@
 
 ## Executive Summary
 
-This document specifies the implementation of **ModernBERT Base** as the primary embedding model for rust-embed, replacing the current MiniLM-L6-v2 model. ModernBERT offers:
+This document specifies the implementation of **ModernBERT Base** as a **selectable model option** in rust-embed, available alongside MiniLM-L6-v2. **Both models will be available** and callers can choose which to use via `PoolConfig.model`.
+
+ModernBERT offers:
 
 - **7× more parameters** (149M vs 22M)
 - **2× embedding dimensions** (768 vs 384)
 - **16× longer context** (8192 tokens vs 512)
 - **Dynamic CPU/GPU routing** based on workload characteristics
 
-This upgrade requires significant architectural changes to support heterogeneous worker pools (mixed CPU and GPU workers) and intelligent device selection.
+**Key Design Decision**: ModernBERT is NOT a replacement for MiniLM. Both models are available simultaneously, and the caller selects which to use based on their requirements:
+
+```rust
+// Caller chooses MiniLM for speed
+let pool = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 6,
+    gpu_workers: 0,
+    model: ModelType::MiniLM,
+    cache_size_per_worker: 5000,
+})?;
+
+// OR caller chooses ModernBERT for quality/long context
+let pool = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 4,
+    gpu_workers: 1,
+    model: ModelType::ModernBERT,
+    cache_size_per_worker: 3000,
+})?;
+```
+
+Implementation requires heterogeneous worker pools (mixed CPU and GPU workers) and intelligent device selection.
+
+---
+
+## Model Coexistence Strategy
+
+### Why Both Models?
+
+Different use cases have different requirements:
+
+| Use Case | Optimal Model | Rationale |
+|----------|---------------|-----------|
+| **Short queries** (<100 tokens) | MiniLM | 3× faster, 6× less memory |
+| **Long documents** (1000-8000 tokens) | ModernBERT | Only option (MiniLM limited to 512) |
+| **High throughput** (millions of texts) | MiniLM | Can run 6× more workers in same RAM |
+| **High quality** (semantic search) | ModernBERT | Larger model, better representations |
+| **Memory constrained** (<16 GB) | MiniLM | ~600 MB for 6 workers |
+| **Memory available** (≥32 GB) | ModernBERT | Can use hybrid CPU/GPU |
+
+### Model Selection at Configuration Time
+
+```rust
+pub enum ModelType {
+    /// MiniLM-L6-v2: Fast, efficient, 384 dims, 512 tokens max
+    MiniLM,
+
+    /// ModernBERT Base: High quality, 768 dims, 8192 tokens max
+    ModernBERT,
+}
+
+// Caller specifies in PoolConfig
+pub struct PoolConfig {
+    pub cpu_workers: usize,
+    pub gpu_workers: usize,
+    pub model: ModelType,              // ← Model selection
+    pub cache_size_per_worker: usize,
+}
+```
+
+### Switching Models
+
+**Cannot switch during reconfigure**: Model change requires loading new weights (600 MB vs 90 MB), initializing new tokenizer, and clearing caches. Must create new pool:
+
+```rust
+// Correct: Create new pool for different model
+let pool_minilm = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 6,
+    gpu_workers: 0,
+    model: ModelType::MiniLM,
+    cache_size_per_worker: 5000,
+})?;
+
+// Process with MiniLM
+pool_minilm.embed_batch(texts)?;
+pool_minilm.shutdown()?;
+
+// Switch to ModernBERT
+let pool_modernbert = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 4,
+    gpu_workers: 1,
+    model: ModelType::ModernBERT,
+    cache_size_per_worker: 3000,
+})?;
+
+// Process with ModernBERT
+pool_modernbert.embed_batch(texts)?;
+pool_modernbert.shutdown()?;
+
+// Incorrect: Cannot use reconfigure to switch models
+// pool.reconfigure(config_with_different_model)?; // ← Will error
+```
 
 ---
 
@@ -797,52 +889,84 @@ fn test_hybrid_pool() {
 
 ## Implementation Roadmap
 
-### Phase 1: Basic ModernBERT Support (Week 1-2)
+### Implementation as Model Option (Not Replacement)
+
+ModernBERT will be added as a **selectable model type**, not a replacement for MiniLM. Both models coexist.
+
+### Phase 1: Model Loading and Pooling (Week 1-2)
+- [ ] Add ModernBERT to ModelType enum
 - [ ] Implement ModernBERT model loading via rust-bert
-- [ ] Implement mean pooling function
-- [ ] Implement L2 normalization
-- [ ] Create ModernBERTWorker (CPU only)
+- [ ] Implement mean pooling function (different from MiniLM's CLS token)
+- [ ] Implement L2 normalization (same as MiniLM)
 - [ ] Add token estimation utilities
 - [ ] Unit tests for pooling and normalization
+- [ ] Validate ModernBERT can be loaded in worker
 
-### Phase 2: GPU Support (Week 3)
-- [ ] Add MPS device support for workers
-- [ ] Implement device selection logic
-- [ ] Create GPU worker initialization
+### Phase 2: CPU Worker Support (Week 2-3)
+- [ ] Update EmbeddingWorker to handle both MiniLM and ModernBERT
+- [ ] Add model-specific initialization logic
+- [ ] Test CPU-only ModernBERT workers
+- [ ] Benchmark ModernBERT CPU performance
+- [ ] Ensure PoolConfig validation handles both models
+
+### Phase 3: GPU Worker Support (Week 3-4)
+- [ ] Add GPU worker initialization with Device::Mps
+- [ ] Implement device selection logic (CPU vs GPU)
+- [ ] Create GPU-specific worker configuration
 - [ ] Test GPU inference path
-- [ ] Benchmark CPU vs GPU latency
+- [ ] Benchmark GPU vs CPU performance by sequence length
 
-### Phase 3: Hybrid Pool (Week 4)
-- [ ] Implement RequestRouter
-- [ ] Create HybridPoolConfig
-- [ ] Implement ModernBERTPool with mixed workers
-- [ ] Add dynamic routing based on sequence length
-- [ ] Integration tests
+### Phase 4: Dynamic Routing (Week 4-5)
+- [ ] Implement route_worker() logic for ModernBERT
+- [ ] Add sequence length estimation
+- [ ] Implement routing thresholds (1024, 512, 2048)
+- [ ] Test routing decisions
+- [ ] Ensure MiniLM still routes to CPU only
 
-### Phase 4: Optimization (Week 5-6)
+### Phase 5: Integration and Testing (Week 5-6)
+- [ ] Update CLI to support both models
+- [ ] Add `--model` flag (minilm or modernbert)
+- [ ] Integration tests with both models
+- [ ] Performance benchmarks
+- [ ] Documentation and examples
+
+### Phase 6: Optimization (Week 6-7)
 - [ ] Tune routing thresholds based on benchmarks
-- [ ] Implement adaptive worker allocation
-- [ ] Add configuration file support
-- [ ] Performance testing and optimization
-- [ ] Documentation
-
-### Phase 5: Migration (Week 7)
-- [ ] Create compatibility layer for MiniLM
-- [ ] Add feature flags
-- [ ] Migration guide
-- [ ] Update examples and CLI
+- [ ] Memory usage optimization
+- [ ] Performance testing
+- [ ] Update all documentation
+- [ ] Add model selection guide
 
 ---
 
 ## Conclusion
 
-ModernBERT Base represents a significant upgrade in embedding quality and context length, at the cost of increased memory and compute requirements. The hybrid CPU/GPU worker pool architecture enables:
+ModernBERT Base will be added as a **selectable model option** alongside MiniLM-L6-v2, giving callers choice based on their requirements:
 
-1. **Intelligent routing** based on workload characteristics
+### Model Coexistence Benefits
+
+1. **Flexibility**: Caller chooses model based on use case (speed vs quality, short vs long context)
+2. **Resource Control**: Caller allocates resources appropriately (MiniLM = 600 MB, ModernBERT = 6-14 GB)
+3. **No Forced Migration**: Existing MiniLM users unaffected
+4. **Library Principle**: Configuration-time decision, not library decision
+
+### Architecture Benefits
+
+The hybrid CPU/GPU worker pool architecture enables:
+
+1. **Intelligent routing** based on workload characteristics (ModernBERT only)
 2. **Resource efficiency** by using GPU only when beneficial
 3. **Scalability** through heterogeneous worker pools
 4. **Flexibility** to adapt to available hardware
 
-**Memory trade-off**: 6-18 GB (vs 622 MB for MiniLM) for substantially better embeddings and 16× longer context.
+### Memory Trade-offs
 
-**Approved for implementation** in rust-embed v0.2.0.
+| Model | Workers | Memory | Use Case |
+|-------|---------|--------|----------|
+| **MiniLM** | 6 CPU | 622 MB | Fast, efficient, short texts |
+| **ModernBERT** | 4 CPU + 1 GPU | ~7 GB | Quality, long context (up to 8192 tokens) |
+| **ModernBERT** | 8 CPU + 2 GPU | ~14 GB | Maximum quality, requires ≥32 GB RAM |
+
+**Approved for implementation** as model option in rust-embed v0.2.1 or v0.3.0.
+
+**Key Principle**: Both models available, caller chooses via `PoolConfig.model`.

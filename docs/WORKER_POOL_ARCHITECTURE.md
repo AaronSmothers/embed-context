@@ -170,26 +170,57 @@ Apple Silicon uses **unified memory** shared between CPU and GPU (Metal Performa
 
 ## Model Selection Strategy
 
-rust-embed supports multiple embedding models with different trade-offs:
+rust-embed supports multiple embedding models with different trade-offs. **Both models are available simultaneously** and can be selected via `PoolConfig.model`:
 
-| Model | Parameters | Dimensions | Max Tokens | Memory/Worker | Strategy |
-|-------|------------|------------|------------|---------------|----------|
-| **MiniLM-L6-v2** | 22M | 384 | 512 | ~100 MB | CPU-only |
-| **ModernBERT Base** | 149M | 768 | 8192 | ~1-3 GB | **Hybrid CPU/GPU** |
+| Model | Parameters | Dimensions | Max Tokens | Memory/Worker | Strategy | When to Use |
+|-------|------------|------------|------------|---------------|----------|-------------|
+| **MiniLM-L6-v2** | 22M | 384 | 512 | ~100 MB | CPU-only | Fast, efficient, short texts |
+| **ModernBERT Base** | 149M | 768 | 8192 | ~1-3 GB | **Hybrid CPU/GPU** | Long context, higher quality |
+
+### Selecting a Model at Runtime
+
+```rust
+// Option 1: Use MiniLM for speed and efficiency
+let config = PoolConfig {
+    cpu_workers: 6,
+    gpu_workers: 0,
+    model: ModelType::MiniLM,
+    cache_size_per_worker: 5000,
+};
+
+// Option 2: Use ModernBERT for quality and long context
+let config = PoolConfig {
+    cpu_workers: 4,
+    gpu_workers: 1,
+    model: ModelType::ModernBERT,
+    cache_size_per_worker: 3000,
+};
+
+// Option 3: Switch models at runtime
+let mut pool = EmbeddingPool::new(config_minilm)?;
+// ... process with MiniLM ...
+
+// Cannot switch models with reconfigure - must create new pool
+pool.shutdown()?;
+let pool = EmbeddingPool::new(config_modernbert)?;
+// ... process with ModernBERT ...
+```
 
 ### Model Selection Guide
 
 **Use MiniLM-L6-v2 when:**
-- Memory is constrained (<16 GB)
-- Processing short texts (<512 tokens)
-- Throughput priority over quality
-- Simplest architecture (CPU-only)
+- ✅ Processing short texts (<512 tokens)
+- ✅ Throughput is priority over quality
+- ✅ Memory constrained (<16 GB RAM)
+- ✅ CPU-only environment
+- ✅ Simple deployment (no GPU needed)
 
 **Use ModernBERT Base when:**
-- Long context required (up to 8192 tokens)
-- Higher quality embeddings needed
-- Memory available (≥16 GB)
-- Willing to use hybrid CPU/GPU architecture
+- ✅ Long context required (up to 8192 tokens)
+- ✅ Higher quality embeddings needed
+- ✅ Memory available (≥16 GB RAM)
+- ✅ GPU available (Apple Silicon MPS)
+- ✅ Processing documents, not snippets
 
 ---
 
@@ -1198,20 +1229,25 @@ let config = PoolConfig {
 - [ ] Performance benchmarks
 - [ ] Documentation
 
-### Phase 4: Optimization (Future)
-- [ ] Evaluate shared read cache (if needed)
-- [ ] Evaluate cache sharding (if needed)
-- [ ] Auto-scaling worker count
-
-### Phase 5: ModernBERT Support (v0.3.0)
-- [ ] Implement ModernBERT model loading
+### Phase 4: ModernBERT Model Support (v0.2.1 or v0.3.0)
+- [ ] Implement ModernBERT model loading via rust-bert
 - [ ] Implement mean pooling for ModernBERT
-- [ ] Add GPU worker support (MPS)
-- [ ] Implement dynamic device routing
-- [ ] Create heterogeneous worker pool
-- [ ] Add model selection in configuration
+- [ ] Add GPU worker support (Device::Mps)
+- [ ] Implement dynamic device routing (CPU/GPU based on sequence length)
+- [ ] Update ModelType enum to support both MiniLM and ModernBERT
+- [ ] Ensure PoolConfig.model can be set to either model type
+- [ ] Add model-specific validation in PoolConfig.validate()
+- [ ] Update worker initialization to handle both model types
 - [ ] Benchmark and tune routing thresholds
-- [ ] Migration guide from MiniLM
+- [ ] Documentation and examples for both models
+
+**Design Principle**: Both MiniLM and ModernBERT are selectable via `PoolConfig.model`. Caller chooses based on use case.
+
+### Phase 5: Optimization (Future)
+- [ ] Evaluate shared read cache (if beneficial)
+- [ ] Evaluate cache sharding (if needed)
+- [ ] Performance monitoring and metrics
+- [ ] Advanced routing strategies
 
 See [MODERNBERT_IMPLEMENTATION.md](./MODERNBERT_IMPLEMENTATION.md) for detailed implementation plan.
 
@@ -1352,17 +1388,21 @@ The worker pool architecture provides:
 
 ### Model-Specific Recommendations
 
-**MiniLM-L6-v2 (v0.2.0):**
+**Both models are available and selectable via `PoolConfig.model`:**
+
+**MiniLM-L6-v2:**
 - **Strategy**: CPU-only workers
 - **Memory**: 622 MB for 6 workers
 - **Performance**: ~570 emb/sec (6 workers)
 - **Use case**: Short texts (<512 tokens), throughput priority, memory-constrained systems
+- **Configuration**: `ModelType::MiniLM`, `gpu_workers: 0`
 
-**ModernBERT Base (v0.3.0):**
+**ModernBERT Base:**
 - **Strategy**: Hybrid CPU/GPU workers with dynamic routing
 - **Memory**: 6-14 GB (depending on worker count)
 - **Performance**: Variable (depends on sequence length and routing)
 - **Use case**: Long context (up to 8192 tokens), quality priority, ≥16 GB RAM
+- **Configuration**: `ModelType::ModernBERT`, `gpu_workers: 0-2` (optional)
 
 ### Memory Trade-offs
 
@@ -1374,8 +1414,10 @@ The worker pool architecture provides:
 
 **Verdict**: Worker pool architecture is **approved for implementation**. Memory cost is acceptable for the gains in simplicity, performance, and code maintainability.
 
-- **Phase 1 (v0.2.0)**: MiniLM with CPU-only workers
-- **Phase 2 (v0.3.0)**: ModernBERT with hybrid CPU/GPU workers
+**Implementation Strategy**:
+- **v0.2.0 (Current)**: MiniLM with CPU-only workers, explicit configuration, dynamic scaling
+- **v0.2.1 or v0.3.0 (Next)**: Add ModernBERT as selectable model option (both models available)
+- **Caller chooses**: Model selection is a configuration-time decision via `PoolConfig.model`
 
 ---
 
