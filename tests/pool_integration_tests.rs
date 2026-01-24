@@ -8,6 +8,7 @@ fn test_pool_single_worker() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: 1000,
+        routing_config: None,
     };
 
     let pool = EmbeddingPool::new(config)?;
@@ -34,6 +35,7 @@ fn test_pool_multiple_workers() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: 1000,
+        routing_config: None,
     };
 
     let pool = EmbeddingPool::new(config)?;
@@ -92,6 +94,7 @@ fn test_pool_reconfiguration() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: 1000,
+        routing_config: None,
     })?;
 
     assert_eq!(pool.worker_count(), 2);
@@ -102,6 +105,7 @@ fn test_pool_reconfiguration() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: 1000,
+        routing_config: None,
     })?;
 
     assert_eq!(pool.worker_count(), 4);
@@ -117,6 +121,7 @@ fn test_pool_reconfiguration() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: 1000,
+        routing_config: None,
     })?;
 
     assert_eq!(pool.worker_count(), 1);

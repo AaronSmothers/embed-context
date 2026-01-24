@@ -15,7 +15,7 @@ pub use models::mini_lm::MiniLMEmbedder;
 pub use models::ModelConfig;
 
 // Re-export pool types (v0.2.0 worker pool API)
-pub use pool::{EmbeddingPool, PoolConfig, ModelType, PoolSuggestion, suggest_pool_config};
+pub use pool::{EmbeddingPool, PoolConfig, ModelType, RoutingConfig, PoolSuggestion, suggest_pool_config};
 
 /// Version of the rust-embed library
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

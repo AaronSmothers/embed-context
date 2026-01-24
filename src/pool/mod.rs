@@ -22,6 +22,33 @@ pub enum ModelType {
     MiniLM,
 }
 
+/// Routing configuration for dynamic CPU/GPU selection (ModernBERT only)
+/// Controls when the pool routes work to CPU vs GPU workers based on sequence length
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutingConfig {
+    /// Sequence length threshold for routing to GPU (default: 1024 tokens)
+    /// Sequences >= this length are sent to GPU workers (if available)
+    pub long_sequence_threshold: usize,
+
+    /// Batch size threshold for preferring CPU (default: 512)
+    /// Small batches below this size may be faster on CPU due to GPU overhead
+    pub small_batch_threshold: usize,
+
+    /// Batch size threshold for preferring GPU (default: 2048)
+    /// Large batches above this size benefit most from GPU parallelism
+    pub large_batch_threshold: usize,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            long_sequence_threshold: 1024,
+            small_batch_threshold: 512,
+            large_batch_threshold: 2048,
+        }
+    }
+}
+
 /// Worker pool configuration - MUST be explicitly provided by caller
 /// No defaults - library does not make resource decisions
 #[derive(Debug, Clone)]
@@ -37,6 +64,11 @@ pub struct PoolConfig {
 
     /// Cache size per worker (number of embeddings)
     pub cache_size_per_worker: usize,
+
+    /// Optional routing configuration for CPU/GPU selection (ModernBERT only)
+    /// If None, uses RoutingConfig::default()
+    /// Ignored for MiniLM (CPU-only model)
+    pub routing_config: Option<RoutingConfig>,
 }
 
 impl PoolConfig {
@@ -47,6 +79,7 @@ impl PoolConfig {
             gpu_workers: 0,
             model: ModelType::MiniLM,
             cache_size_per_worker: 2000,
+            routing_config: None,
         }
     }
 
@@ -57,6 +90,7 @@ impl PoolConfig {
             gpu_workers: 0,
             model: ModelType::MiniLM,
             cache_size_per_worker: 5000,
+            routing_config: None,
         }
     }
 
@@ -67,7 +101,13 @@ impl PoolConfig {
             gpu_workers: 0,
             model: ModelType::MiniLM,
             cache_size_per_worker: 5000,
+            routing_config: None,
         }
+    }
+
+    /// Get effective routing configuration (returns default if not specified)
+    pub fn routing_config(&self) -> RoutingConfig {
+        self.routing_config.unwrap_or_default()
     }
 
     /// Validate configuration
@@ -82,6 +122,28 @@ impl PoolConfig {
 
         if self.cpu_workers > 16 {
             log::warn!("Using {} CPU workers - this may exceed system capacity", self.cpu_workers);
+        }
+
+        // Validate routing config if provided
+        if let Some(routing) = self.routing_config {
+            if routing.small_batch_threshold > routing.large_batch_threshold {
+                return Err(anyhow!(
+                    "small_batch_threshold ({}) must be <= large_batch_threshold ({})",
+                    routing.small_batch_threshold,
+                    routing.large_batch_threshold
+                ));
+            }
+
+            if routing.long_sequence_threshold == 0 {
+                return Err(anyhow!("long_sequence_threshold must be > 0"));
+            }
+        }
+
+        // Routing config only makes sense for ModernBERT (hybrid CPU/GPU model)
+        if self.routing_config.is_some() && self.model == ModelType::MiniLM {
+            log::warn!(
+                "routing_config specified but model is MiniLM (CPU-only). Routing config will be ignored."
+            );
         }
 
         Ok(())
@@ -235,21 +297,30 @@ impl EmbeddingPool {
         })
     }
 
-    /// Reconfigure pool with new worker counts
+    /// Reconfigure pool with new worker counts and routing settings
     /// - Spawns new workers if count increased
     /// - Gracefully shuts down excess workers if count decreased
+    /// - Updates routing configuration (for ModernBERT CPU/GPU routing)
     /// - Allows upstream to dynamically adjust resource allocation
+    ///
+    /// Cannot change: model type (requires new pool)
+    /// Can change: cpu_workers, gpu_workers, cache_size_per_worker, routing_config
     pub fn reconfigure(&mut self, new_config: PoolConfig) -> Result<()> {
         new_config.validate()?;
 
         if new_config.model != self.current_config.model {
-            return Err(anyhow!("Cannot change model type during reconfiguration"));
+            return Err(anyhow!(
+                "Cannot change model type during reconfiguration. Create a new pool instead."
+            ));
         }
 
+        let routing_changed = new_config.routing_config != self.current_config.routing_config;
+
         log::info!(
-            "Reconfiguring pool: {} → {} CPU workers",
+            "Reconfiguring pool: {} → {} CPU workers{}",
             self.current_config.cpu_workers,
-            new_config.cpu_workers
+            new_config.cpu_workers,
+            if routing_changed { " (routing config updated)" } else { "" }
         );
 
         match new_config.cpu_workers.cmp(&self.workers.len()) {
@@ -507,6 +578,7 @@ mod tests {
             gpu_workers: 0,
             model: ModelType::MiniLM,
             cache_size_per_worker: 5000,
+            routing_config: None,
         };
         assert!(config.validate().is_ok());
 
@@ -516,6 +588,7 @@ mod tests {
             gpu_workers: 0,
             model: ModelType::MiniLM,
             cache_size_per_worker: 5000,
+            routing_config: None,
         };
         assert!(config.validate().is_err());
 
@@ -525,8 +598,51 @@ mod tests {
             gpu_workers: 1,
             model: ModelType::MiniLM,
             cache_size_per_worker: 5000,
+            routing_config: None,
         };
         assert!(config.validate().is_err());
+
+        // Invalid: small_batch_threshold > large_batch_threshold
+        let config = PoolConfig {
+            cpu_workers: 4,
+            gpu_workers: 0,
+            model: ModelType::MiniLM,
+            cache_size_per_worker: 5000,
+            routing_config: Some(RoutingConfig {
+                long_sequence_threshold: 1024,
+                small_batch_threshold: 3000,
+                large_batch_threshold: 2000,
+            }),
+        };
+        assert!(config.validate().is_err());
+
+        // Invalid: long_sequence_threshold = 0
+        let config = PoolConfig {
+            cpu_workers: 4,
+            gpu_workers: 0,
+            model: ModelType::MiniLM,
+            cache_size_per_worker: 5000,
+            routing_config: Some(RoutingConfig {
+                long_sequence_threshold: 0,
+                small_batch_threshold: 512,
+                large_batch_threshold: 2048,
+            }),
+        };
+        assert!(config.validate().is_err());
+
+        // Valid: custom routing config
+        let config = PoolConfig {
+            cpu_workers: 4,
+            gpu_workers: 0,
+            model: ModelType::MiniLM,
+            cache_size_per_worker: 5000,
+            routing_config: Some(RoutingConfig {
+                long_sequence_threshold: 2048,
+                small_batch_threshold: 256,
+                large_batch_threshold: 4096,
+            }),
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -93,6 +93,7 @@ fn main() -> Result<()> {
         gpu_workers: 0,
         model: ModelType::MiniLM,
         cache_size_per_worker: args.cache_size,
+        routing_config: None,
     };
 
     // Create the embedding pool
