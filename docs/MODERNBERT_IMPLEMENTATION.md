@@ -457,6 +457,34 @@ pub fn batch_tokens(texts: &[String]) -> usize {
 
 ---
 
+## Library Design - Explicit Configuration Required
+
+**CRITICAL**: ModernBERT implementation follows rust-embed's library-first design:
+- Worker counts are ALWAYS explicitly specified by caller
+- No auto-detection of system resources
+- Support dynamic reconfiguration at runtime
+- Caller controls CPU/GPU worker allocation
+
+```rust
+// Caller MUST provide explicit configuration
+let config = HybridPoolConfig {
+    cpu_workers: 4,      // Explicit, no default
+    gpu_workers: 1,      // Explicit, no default
+    routing_strategy: RoutingStrategy::Dynamic,
+};
+
+let pool = ModernBERTPool::new(config)?;
+
+// Dynamic reconfiguration supported
+pool.reconfigure(HybridPoolConfig {
+    cpu_workers: 8,      // Scale up
+    gpu_workers: 2,
+    routing_strategy: RoutingStrategy::Dynamic,
+})?;
+```
+
+---
+
 ## Hybrid Pool Implementation
 
 ### Complete Pool Structure
