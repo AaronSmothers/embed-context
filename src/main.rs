@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use ndarray::s;
 use rust_embed::{
-    models::mini_lm::MiniLMEmbedder,
+    EmbeddingPool, PoolConfig, ModelType, suggest_pool_config,
     utils,
 };
 use std::path::PathBuf;
@@ -15,22 +15,30 @@ struct Args {
     /// Text to embed
     #[arg(short, long)]
     text: Option<String>,
-    
+
     /// File containing text to embed (one text per line)
     #[arg(short, long)]
     file: Option<PathBuf>,
-    
+
     /// Output file for the embeddings
     #[arg(short, long)]
     output: Option<PathBuf>,
-    
+
     /// Create a standalone binary package
     #[arg(long)]
     package: Option<PathBuf>,
-    
+
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Number of worker threads (0 = use suggestion based on system)
+    #[arg(short, long, default_value = "0")]
+    workers: usize,
+
+    /// Cache size per worker
+    #[arg(short, long, default_value = "5000")]
+    cache_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -70,78 +78,86 @@ fn main() -> Result<()> {
         return Ok(());
     }
     
-    // Create the MiniLM embedder
-    let mut embedder = MiniLMEmbedder::new();
-    
-    // Initialize the model (download and load both tokenizer and model)
-    info!("Initializing the embedder...");
-    embedder.initialize()?;
-    
+    // Determine worker count
+    let worker_count = if args.workers == 0 {
+        let suggestion = suggest_pool_config();
+        info!("Auto-detecting worker count: {} workers suggested", suggestion.cpu_workers);
+        suggestion.cpu_workers
+    } else {
+        args.workers
+    };
+
+    // Create pool configuration
+    let pool_config = PoolConfig {
+        cpu_workers: worker_count,
+        gpu_workers: 0,
+        model: ModelType::MiniLM,
+        cache_size_per_worker: args.cache_size,
+    };
+
+    // Create the embedding pool
+    info!("Creating embedding pool with {} workers...", pool_config.cpu_workers);
+    let pool = EmbeddingPool::new(pool_config)?;
+
     // Output info about the model
-    info!("Using the {} model for generating embeddings.", embedder.model_name());
-    info!("Embedding dimension: {}", embedder.dimension());
+    info!("Using MiniLM-L6-v2 model for generating embeddings.");
+    info!("Embedding dimension: 384");
+    info!("Pool ready with {} workers", pool.worker_count());
     
     // Process text based on input source
     if let Some(text) = args.text {
         info!("Embedding single text: {}", text);
-        let embedding = embedder.embed_text(&text)?;
+        let embedding = pool.embed_text(text.clone())?;
         info!("Embedding size: {}", embedding.len());
         debug!("First few values: {:?}", &embedding.slice(s![..5]));
-        
+
         // Save to file if output is specified
         if let Some(output) = &args.output {
             let text_vec = vec![text];
             utils::save_embeddings(
-                &[embedding], 
+                &[embedding],
                 Some(&text_vec),
-                embedder.model_name(),
-                embedder.model_version(),
-                embedder.dimension() as i32,
+                "MiniLM-L6-v2",
+                "2.0",
+                384,
                 output
             )?;
             info!("Embedding saved to {}", output.display());
         }
     } else if let Some(file) = args.file {
         info!("Embedding texts from file: {}", file.display());
-        
+
         // Read file line by line
         let content = std::fs::read_to_string(file)?;
         let texts: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        
-        // Embed each line
-        let mut embeddings = Vec::with_capacity(texts.len());
-        info!("Processing {} texts", texts.len());
-        
-        // Use rayon for parallel processing if we have multiple texts
-        use rayon::prelude::*;
-        if texts.len() > 1 {
-            info!("Using parallel processing for multiple texts");
-            embeddings = texts.par_iter()
-                .map(|text| {
-                    let mut local_embedder = embedder.clone();
-                    local_embedder.embed_text(text)
-                })
-                .filter_map(Result::ok)
-                .collect();
-        } else {
-            for text in &texts {
-                match embedder.embed_text(text) {
-                    Ok(embedding) => embeddings.push(embedding),
-                    Err(e) => warn!("Failed to embed text: {}", e),
-                }
+
+        info!("Processing {} texts with {} workers", texts.len(), pool.worker_count());
+
+        // Use pool's batch embedding (automatically distributes across workers)
+        let embeddings = pool.embed_batch(texts.clone())?;
+
+        info!("Successfully embedded {} texts", embeddings.len());
+
+        // Get and display stats
+        if let Ok(stats) = pool.aggregate_stats() {
+            info!("Pool statistics:");
+            info!("  Total embeddings: {}", stats.embeddings_count);
+            info!("  Cache hits: {}", stats.cache_hits);
+            info!("  Cache misses: {}", stats.cache_misses);
+            if stats.embeddings_count > 0 {
+                let hit_rate = (stats.cache_hits as f64 / stats.embeddings_count as f64) * 100.0;
+                info!("  Cache hit rate: {:.1}%", hit_rate);
             }
         }
-        
-        info!("Successfully embedded {} of {} texts", embeddings.len(), texts.len());
-        
+
         // Save to file if output is specified
         if let Some(output) = &args.output {
             utils::save_embeddings(
-                &embeddings, 
+                &embeddings,
                 Some(&texts),
-                embedder.model_name(),
-                embedder.model_version(),
-                embedder.dimension() as i32,
+                "MiniLM-L6-v2",
+                "2.0",
+                384,
                 output
             )?;
             info!("Embeddings saved to {}", output.display());
@@ -150,6 +166,9 @@ fn main() -> Result<()> {
         warn!("Please provide either --text or --file argument");
         println!("For usage information, run with --help");
     }
+
+    // Graceful shutdown
+    pool.shutdown()?;
     
     Ok(())
 }
