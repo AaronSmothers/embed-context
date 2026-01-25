@@ -88,8 +88,28 @@ let doc_pool = EmbeddingPool::new(PoolConfig {
 | **Max Tokens** | 512 | 8,192 (16× longer) |
 | **Memory/Worker** | ~100 MB | ~1-3 GB (10-30× more) |
 | **CPU Latency** | ~10 ms | ~30 ms (3× slower) |
-| **GPU Support** | No | Yes (MPS) |
+| **GPU Support** | No | Yes (PyTorch MPS) |
 | **Best For** | Short texts, speed | Long texts, quality |
+
+---
+
+## GPU Backend: PyTorch MPS (Not MLX)
+
+ModernBERT GPU acceleration uses **PyTorch's Metal Performance Shaders (MPS) backend** via the tch-rs crate. This is the same PyTorch backend used throughout rust-embed.
+
+### Why PyTorch MPS?
+- **Unified backend**: Same inference engine for CPU and GPU paths
+- **Shared memory**: Apple Silicon UMA enables zero-copy tensor access
+- **Rust bindings**: tch-rs provides mature, well-tested Rust bindings
+- **Consistency**: Matches existing MiniLM implementation
+
+### Why Not MLX?
+- **No Rust bindings**: MLX is Python/C++ only
+- **Fragmentation**: Would require two separate backends
+- **Maintenance burden**: Additional complexity for marginal benefit
+- **PyTorch sufficiency**: MPS provides adequate GPU acceleration
+
+**Decision**: All GPU work uses PyTorch MPS. MLX is explicitly not supported.
 
 ---
 
@@ -190,12 +210,15 @@ impl PoolConfig {
 - [ ] Add ModernBERT to ModelType enum
 - [ ] Implement ModernBERT model loading
 - [ ] Implement mean pooling for ModernBERT
-- [ ] Add GPU worker support (Device::Mps)
+- [ ] Add GPU worker support via PyTorch MPS (Device::Mps)
+- [ ] Leverage Apple Silicon shared memory (UMA) for efficient GPU access
 - [ ] Implement dynamic CPU/GPU routing
 - [ ] Update worker initialization for both models
 - [ ] CLI flag: `--model minilm` or `--model modernbert`
 - [ ] Integration tests with both models
 - [ ] Documentation and examples
+
+**Note**: GPU acceleration uses PyTorch MPS backend only. MLX is not supported.
 
 ---
 

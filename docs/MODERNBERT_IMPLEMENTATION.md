@@ -1,7 +1,7 @@
 # ModernBERT Embedding Model Implementation
-**rust-embed v0.3.0**
-**Models:** answerdotai/ModernBERT-base and answerdotai/ModernBERT-large
-**Date:** 2026-01-25
+**rust-embed v0.2.1 / v0.3.0**
+**Model:** nomic-ai/modernbert-embed-base
+**Date:** 2026-01-24
 **Status:** Planning
 
 ---
@@ -26,6 +26,65 @@ let pool = EmbeddingPool::new(PoolConfig {
     cpu_workers: 6,
     gpu_workers: 0,
     model: ModelType::MiniLM,
+    cache_size_per_worker: 5000,
+})?;
+
+// OR caller chooses ModernBERT for quality/long context
+let pool = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 4,
+    gpu_workers: 1,
+    model: ModelType::ModernBERT,
+    cache_size_per_worker: 3000,
+})?;
+```
+
+Implementation requires heterogeneous worker pools (mixed CPU and GPU workers) and intelligent device selection.
+
+---
+
+## GPU Backend Strategy
+
+### PyTorch Backend (tch-rs) - Required
+
+All GPU development for ModernBERT uses **PyTorch via the tch-rs crate** (Rust bindings for libtorch). This is the same backend used for MiniLM and provides:
+
+- **Unified codebase**: Same inference engine for CPU and GPU
+- **MPS support**: PyTorch's Metal Performance Shaders backend for Apple Silicon GPU
+- **Shared memory on Apple Silicon**: Unified Memory Architecture (UMA) enables zero-copy tensor sharing between CPU and GPU
+- **Mature ecosystem**: Well-tested, production-ready inference
+
+```rust
+use tch::Device;
+
+// PyTorch MPS device for Apple Silicon GPU
+let device = Device::Mps;
+
+// Model loaded via rust-bert (which uses tch-rs internally)
+let model = SentenceEmbeddingsBuilder::remote(model_id)
+    .with_device(device)
+    .create_model()?;
+```
+
+### Apple Silicon Shared Memory
+
+On Apple Silicon (M1/M2/M3/M4), the Unified Memory Architecture allows:
+
+- **Zero-copy GPU access**: Tensors don't need to be copied between CPU and GPU memory
+- **Efficient memory utilization**: Single memory pool shared by CPU cores and GPU
+- **Reduced latency**: No PCIe transfer overhead like discrete GPUs
+
+This is automatically leveraged by PyTorch's MPS backend when using `Device::Mps`.
+
+### MLX Explicitly Not Supported
+
+**rust-embed does NOT use Apple's MLX framework** for the following reasons:
+
+1. **No Rust bindings**: MLX is Python/C++ only; no official Rust support
+2. **Ecosystem fragmentation**: Would require maintaining two separate inference backends
+3. **PyTorch sufficiency**: PyTorch MPS provides adequate GPU acceleration for inference
+4. **Library simplicity**: Single backend (PyTorch) reduces complexity and maintenance burden
+
+All GPU acceleration is delivered through **PyTorch MPS only**. This decision is final for the ModernBERT implementation.
     cache_size_per_worker: 0,
     routing_config: None,
 })?;
@@ -984,12 +1043,14 @@ ModernBERT will be added as a **selectable model type**, not a replacement for M
 - [ ] Benchmark ModernBERT CPU performance
 - [ ] Ensure PoolConfig validation handles both models
 
-### Phase 3: GPU Worker Support (Week 3-4)
-- [ ] Add GPU worker initialization with Device::Mps
-- [ ] Implement device selection logic (CPU vs GPU)
+### Phase 3: GPU Worker Support via PyTorch MPS (Week 3-4)
+- [ ] Add GPU worker initialization with Device::Mps (PyTorch Metal backend)
+- [ ] Implement device selection logic (CPU vs GPU via tch-rs)
 - [ ] Create GPU-specific worker configuration
-- [ ] Test GPU inference path
+- [ ] Test GPU inference path using PyTorch MPS on Apple Silicon
 - [ ] Benchmark GPU vs CPU performance by sequence length
+- [ ] Verify shared memory utilization on Apple Silicon UMA
+- [ ] Document PyTorch MPS requirements and limitations
 
 ### Phase 4: Dynamic Routing (Week 4-5)
 - [ ] Implement route_worker() logic for ModernBERT

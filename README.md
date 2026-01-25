@@ -1,6 +1,6 @@
 # Rust Embeddings
 
-A robust, pure Rust implementation of text embedding algorithms optimized for Apple Silicon M-series chips, using the all-MiniLM-L6-v2 model from Hugging Face.
+A robust Rust implementation of text embedding algorithms optimized for Apple Silicon M-series chips, using the all-MiniLM-L6-v2 model from Hugging Face. Built on rust-bert with PyTorch (libtorch) backend for high-performance inference.
 
 ## Features
 
@@ -110,8 +110,7 @@ This implementation is designed for both speed and efficiency:
 
 ## Future Roadmap
 
-- [ ] Add support for more embedding models
-- [ ] Implement vector database integration for efficient similarity search
+- [ ] Add support for more embedding models (ModernBERT planned)
 - [ ] Add benchmarking tools and performance profiling
 - [ ] Expose the libtorch binary for use by a future inference package
 - [ ] Improve documentation with more usage examples
