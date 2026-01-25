@@ -1,6 +1,7 @@
 pub mod embedding;
 pub mod utils;  // This refers to the src/utils directory with mod.rs
 pub mod models;
+pub mod pool;
 
 // Define the protobuf module
 pub mod proto {
@@ -12,6 +13,9 @@ pub mod proto {
 pub use embedding::{Embedder, CachedEmbedder, EmbeddedText};
 pub use models::mini_lm::MiniLMEmbedder;
 pub use models::ModelConfig;
+
+// Re-export pool types (v0.2.0 worker pool API)
+pub use pool::{EmbeddingPool, PoolConfig, ModelType, RoutingConfig, PoolSuggestion, suggest_pool_config};
 
 /// Version of the rust-embed library
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

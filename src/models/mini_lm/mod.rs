@@ -192,8 +192,8 @@ impl MiniLMEmbedder {
             self.initialize()?;
         }
 
-        // Check if in cache (if caching is enabled)
-        if self.config.cache_embeddings {
+        // Check if in cache (if caching is enabled and cache_size_limit > 0)
+        if self.config.cache_embeddings && self.config.cache_size_limit > 0 {
             if let Some(embedding) = self.embedding_cache.get(text) {
                 self.stats.cache_hits += 1;
                 return Ok(embedding.clone());
@@ -228,19 +228,19 @@ impl MiniLMEmbedder {
         // Update statistics
         self.stats.embeddings_count += 1;
         self.stats.total_processing_time += start.elapsed();
-        
-        // Cache the embedding if enabled
-        if self.config.cache_embeddings {
+
+        // Cache the embedding if enabled and cache_size_limit > 0
+        if self.config.cache_embeddings && self.config.cache_size_limit > 0 {
             self.embedding_cache.insert(text.to_string(), embedding.clone());
-            
-            // Limit cache size
+
+            // Limit cache size (LRU eviction - removes first/oldest entry)
             if self.embedding_cache.len() > self.config.cache_size_limit {
                 if let Some(key) = self.embedding_cache.keys().next().cloned() {
                     self.embedding_cache.remove(&key);
                 }
             }
         }
-        
+
         Ok(embedding)
     }
 

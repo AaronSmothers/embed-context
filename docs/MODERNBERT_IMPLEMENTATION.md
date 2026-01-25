@@ -8,19 +8,20 @@
 
 ## Executive Summary
 
-This document specifies the implementation of **ModernBERT Base** as a **selectable model option** in rust-embed, available alongside MiniLM-L6-v2. **Both models will be available** and callers can choose which to use via `PoolConfig.model`.
+This document specifies the implementation of **ModernBERT Base and ModernBERT Large** as **selectable model options** in rust-embed, available alongside MiniLM-L6-v2. **All three models will be available** and callers can choose which to use via `PoolConfig.model`.
 
 ModernBERT offers:
 
-- **7× more parameters** (149M vs 22M)
-- **2× embedding dimensions** (768 vs 384)
-- **16× longer context** (8192 tokens vs 512)
+- **Base**: 149M params, 768 dims, 8192 tokens max
+- **Large**: 395M params, 1024 dims, 8192 tokens max
+- **16× longer context** than MiniLM (8192 tokens vs 512)
 - **Dynamic CPU/GPU routing** based on workload characteristics
+- **Local model caching** to avoid re-downloading on subsequent runs
 
-**Key Design Decision**: ModernBERT is NOT a replacement for MiniLM. Both models are available simultaneously, and the caller selects which to use based on their requirements:
+**Key Design Decision**: ModernBERT is NOT a replacement for MiniLM. All models are available simultaneously, and the caller selects which to use based on their requirements:
 
 ```rust
-// Caller chooses MiniLM for speed
+// Fast and efficient: MiniLM for short queries
 let pool = EmbeddingPool::new(PoolConfig {
     cpu_workers: 6,
     gpu_workers: 0,
@@ -84,33 +85,62 @@ This is automatically leveraged by PyTorch's MPS backend when using `Device::Mps
 4. **Library simplicity**: Single backend (PyTorch) reduces complexity and maintenance burden
 
 All GPU acceleration is delivered through **PyTorch MPS only**. This decision is final for the ModernBERT implementation.
+    cache_size_per_worker: 0,
+    routing_config: None,
+})?;
+
+// Balanced: ModernBERT Base for quality + long context
+let pool = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 4,
+    gpu_workers: 2,
+    model: ModelType::ModernBERTBase,
+    cache_size_per_worker: 0,
+    routing_config: Some(RoutingConfig::default()),
+})?;
+
+// Maximum quality: ModernBERT Large for best embeddings
+let pool = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 2,
+    gpu_workers: 2,
+    model: ModelType::ModernBERTLarge,
+    cache_size_per_worker: 0,
+    routing_config: Some(RoutingConfig::default()),
+})?;
+```
+
+Implementation requires heterogeneous worker pools (mixed CPU and GPU workers) and intelligent device selection.
 
 ---
 
 ## Model Coexistence Strategy
 
-### Why Both Models?
+### Why Three Models?
 
 Different use cases have different requirements:
 
 | Use Case | Optimal Model | Rationale |
 |----------|---------------|-----------|
 | **Short queries** (<100 tokens) | MiniLM | 3× faster, 6× less memory |
-| **Long documents** (1000-8000 tokens) | ModernBERT | Only option (MiniLM limited to 512) |
+| **Long documents** (1000-8000 tokens) | ModernBERT Base/Large | Only option (MiniLM limited to 512) |
 | **High throughput** (millions of texts) | MiniLM | Can run 6× more workers in same RAM |
-| **High quality** (semantic search) | ModernBERT | Larger model, better representations |
+| **High quality** (semantic search) | ModernBERT Base | Better representations than MiniLM |
+| **Maximum quality** (critical applications) | ModernBERT Large | Best embeddings, 1024 dims |
 | **Memory constrained** (<16 GB) | MiniLM | ~600 MB for 6 workers |
-| **Memory available** (≥32 GB) | ModernBERT | Can use hybrid CPU/GPU |
+| **Memory available** (16-32 GB) | ModernBERT Base | 600 MB per worker |
+| **Memory available** (≥32 GB) | ModernBERT Large | 1.6 GB per worker |
 
 ### Model Selection at Configuration Time
 
 ```rust
 pub enum ModelType {
-    /// MiniLM-L6-v2: Fast, efficient, 384 dims, 512 tokens max
+    /// MiniLM-L6-v2: Fast, efficient, 384 dims, 512 tokens max, CPU-only
     MiniLM,
 
-    /// ModernBERT Base: High quality, 768 dims, 8192 tokens max
-    ModernBERT,
+    /// ModernBERT Base: High quality, 768 dims, 8192 tokens max, CPU/GPU hybrid
+    ModernBERTBase,
+
+    /// ModernBERT Large: Maximum quality, 1024 dims, 8192 tokens max, CPU/GPU hybrid
+    ModernBERTLarge,
 }
 
 // Caller specifies in PoolConfig
@@ -119,12 +149,13 @@ pub struct PoolConfig {
     pub gpu_workers: usize,
     pub model: ModelType,              // ← Model selection
     pub cache_size_per_worker: usize,
+    pub routing_config: Option<RoutingConfig>,  // ← CPU/GPU routing (ModernBERT only)
 }
 ```
 
 ### Switching Models
 
-**Cannot switch during reconfigure**: Model change requires loading new weights (600 MB vs 90 MB), initializing new tokenizer, and clearing caches. Must create new pool:
+**Cannot switch during reconfigure**: Model change requires loading new weights, initializing new tokenizer, and clearing caches. Must create new pool:
 
 ```rust
 // Correct: Create new pool for different model
@@ -132,28 +163,81 @@ let pool_minilm = EmbeddingPool::new(PoolConfig {
     cpu_workers: 6,
     gpu_workers: 0,
     model: ModelType::MiniLM,
-    cache_size_per_worker: 5000,
+    cache_size_per_worker: 0,
+    routing_config: None,
 })?;
 
 // Process with MiniLM
 pool_minilm.embed_batch(texts)?;
 pool_minilm.shutdown()?;
 
-// Switch to ModernBERT
-let pool_modernbert = EmbeddingPool::new(PoolConfig {
+// Switch to ModernBERT Base
+let pool_base = EmbeddingPool::new(PoolConfig {
     cpu_workers: 4,
-    gpu_workers: 1,
-    model: ModelType::ModernBERT,
-    cache_size_per_worker: 3000,
+    gpu_workers: 2,
+    model: ModelType::ModernBERTBase,
+    cache_size_per_worker: 0,
+    routing_config: Some(RoutingConfig::default()),
 })?;
 
-// Process with ModernBERT
-pool_modernbert.embed_batch(texts)?;
-pool_modernbert.shutdown()?;
+// Process with ModernBERT Base
+pool_base.embed_batch(texts)?;
+pool_base.shutdown()?;
+
+// Switch to ModernBERT Large for maximum quality
+let pool_large = EmbeddingPool::new(PoolConfig {
+    cpu_workers: 2,
+    gpu_workers: 2,
+    model: ModelType::ModernBERTLarge,
+    cache_size_per_worker: 0,
+    routing_config: Some(RoutingConfig::default()),
+})?;
+
+// Process with ModernBERT Large
+pool_large.embed_batch(texts)?;
+pool_large.shutdown()?;
 
 // Incorrect: Cannot use reconfigure to switch models
 // pool.reconfigure(config_with_different_model)?; // ← Will error
 ```
+
+### Model Caching and Downloads
+
+**Critical: Models are cached locally after first download**
+
+When you first use a model, rust-bert downloads it to a local cache directory:
+- **Linux/macOS**: `~/.cache/huggingface/hub/`
+- **Windows**: `%USERPROFILE%\.cache\huggingface\hub\`
+
+**First run** (per model):
+```
+Loading ModernBERT Base model...
+Downloading model files from answerdotai/ModernBERT-base...
+  - pytorch_model.bin (600 MB) ████████████ 100%
+  - config.json (1 KB)
+  - tokenizer.json (2 MB)
+Model loaded successfully (downloaded in 45s)
+```
+
+**Subsequent runs** (same model):
+```
+Loading ModernBERT Base model...
+Using cached model from ~/.cache/huggingface/hub/
+Model loaded successfully (loaded in 2s)
+```
+
+**Model Storage**:
+- MiniLM-L6-v2: ~90 MB on disk
+- ModernBERT Base: ~600 MB on disk
+- ModernBERT Large: ~1.6 GB on disk
+
+**Total disk space needed**: ~2.3 GB for all three models
+
+**Important**:
+- Each model is downloaded ONCE and reused forever
+- No re-download on subsequent runs or restarts
+- Safe to delete cache to free space (will re-download on next use)
+- Multiple workers share the same cached model files (no duplication)
 
 ---
 
@@ -161,39 +245,43 @@ pool_modernbert.shutdown()?;
 
 ### Model Configuration
 
-| Parameter | Value | vs MiniLM-L6-v2 |
-|-----------|-------|-----------------|
-| **Model ID** | `nomic-ai/modernbert-embed-base` | `sentence-transformers/all-MiniLM-L6-v2` |
-| **Parameters** | 149M | 22M (~7× larger) |
-| **Hidden Size** | 768 | 384 (2× wider) |
-| **Layers** | 22 | 6 (~4× deeper) |
-| **Attention Heads** | 12 | 12 (same) |
-| **Intermediate Size** | 1152 | 1536 |
-| **Max Position Embeddings** | 8192 | 512 (16× longer) |
-| **Vocabulary Size** | 50,368 | 30,522 |
-| **Output Dimensions** | 768 | 384 (2× larger) |
+| Parameter | MiniLM-L6-v2 | ModernBERT Base | ModernBERT Large |
+|-----------|--------------|-----------------|------------------|
+| **Model ID** | `sentence-transformers/all-MiniLM-L6-v2` | `answerdotai/ModernBERT-base` | `answerdotai/ModernBERT-large` |
+| **Parameters** | 22M | 149M (~7× larger) | 395M (~18× larger) |
+| **Hidden Size** | 384 | 768 (2× wider) | 1024 (~3× wider) |
+| **Layers** | 6 | 22 (~4× deeper) | 28 (~5× deeper) |
+| **Attention Heads** | 12 | 12 (same) | 16 |
+| **Intermediate Size** | 1536 | 1152 | 1344 |
+| **Max Position Embeddings** | 512 | 8192 (16× longer) | 8192 (16× longer) |
+| **Vocabulary Size** | 30,522 | 50,368 | 50,368 |
+| **Output Dimensions** | 384 | 768 (2× larger) | 1024 (~3× larger) |
 
 ### Memory Requirements
 
-| Configuration | Per Worker | Notes |
-|---------------|------------|-------|
-| **Weights (FP32)** | ~600 MB | Model parameters only |
-| **Runtime (short sequences <512 tokens)** | ~1 GB | Includes activations + cache |
-| **Runtime (long sequences ~8192 tokens)** | ~2-3 GB | Large activation memory |
-| **Tokenizer vocab** | ~10 MB | Vocabulary + special tokens |
-| **Total per worker** | **~1-3 GB** | Depends on sequence length |
+| Configuration | MiniLM | ModernBERT Base | ModernBERT Large |
+|---------------|--------|-----------------|------------------|
+| **Weights (FP32)** | ~90 MB | ~600 MB | ~1.6 GB |
+| **Disk storage** | ~90 MB | ~600 MB | ~1.6 GB |
+| **Runtime (short <512 tokens)** | ~150 MB | ~1 GB | ~2 GB |
+| **Runtime (long ~8192 tokens)** | N/A (max 512) | ~2-3 GB | ~4-5 GB |
+| **Tokenizer vocab** | ~5 MB | ~10 MB | ~10 MB |
+| **Total per worker (typical)** | **~150 MB** | **~1-3 GB** | **~2-5 GB** |
 
 ### Comparison Table
 
-| Metric | MiniLM-L6-v2 | ModernBERT Base | Impact |
-|--------|--------------|-----------------|--------|
-| Model size | 96 MB | 600 MB | +525 MB per worker |
-| Runtime memory | 150 MB | 1-3 GB | +10-20× |
-| Max sequence | 512 tokens | 8192 tokens | +16× context |
-| Embedding dim | 384 | 768 | +2× vector size |
-| CPU inference (single) | ~10 ms | ~30-50 ms | +3-5× slower |
-| GPU inference (single) | N/A (not used) | ~15-25 ms | Competitive |
-| GPU inference (batch=32) | N/A | ~80 ms | ~2.5 ms/item |
+| Metric | MiniLM-L6-v2 | ModernBERT Base | ModernBERT Large |
+|--------|--------------|-----------------|------------------|
+| **Disk size** | 90 MB | 600 MB | 1.6 GB |
+| **Runtime memory** | 150 MB | 1-3 GB | 2-5 GB |
+| **Max sequence** | 512 tokens | 8192 tokens | 8192 tokens |
+| **Embedding dim** | 384 | 768 | 1024 |
+| **CPU inference (single)** | ~10 ms | ~30-50 ms | ~60-100 ms |
+| **GPU inference (single)** | N/A | ~15-25 ms | ~25-40 ms |
+| **GPU inference (batch=32)** | N/A | ~80 ms (~2.5 ms/item) | ~120 ms (~3.8 ms/item) |
+| **Quality (MTEB avg)** | ~58.0 | ~64.5 (estimated) | ~66.0 (estimated) |
+| **Workers per 16GB RAM** | ~100 workers | ~5 workers | ~3 workers |
+| **Workers per 32GB RAM** | ~200 workers | ~10 workers | ~6 workers |
 
 ---
 

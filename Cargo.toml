@@ -1,9 +1,9 @@
 [package]
 name = "rust_embed"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Your Name"]
-description = "A pure Rust implementation of embedding algorithms"
+description = "A pure Rust implementation of embedding algorithms with worker pool architecture"
 
 [dependencies]
 ndarray = "0.15.6"    # For linear algebra and numerical computing
@@ -31,6 +31,8 @@ parking_lot = "0.12.1" # More efficient Mutex implementation
 once_cell = "1.18.0"  # Alternative to lazy_static with better ergonomics
 rayon = "1.7.0"       # Parallel iterators
 chrono = "0.4.26"     # For datetime handling
+crossbeam = "0.8.2"   # For worker pool channels
+num_cpus = "1.16.0"   # For detecting CPU count
 
 [build-dependencies]
 prost-build = "0.11.8" # For generating Protobuf code
