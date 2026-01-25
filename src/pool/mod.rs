@@ -18,8 +18,58 @@ use tokio::sync::oneshot;
 /// Model types supported by the pool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
-    /// MiniLM-L6-v2 (22M params, 384 dims, CPU-only)
+    /// MiniLM-L6-v2 (22M params, 384 dims, 512 max tokens, CPU-only)
     MiniLM,
+    /// ModernBERT Base (149M params, 768 dims, 8192 max tokens, CPU/GPU hybrid)
+    ModernBERTBase,
+    /// ModernBERT Large (395M params, 1024 dims, 8192 max tokens, CPU/GPU hybrid)
+    ModernBERTLarge,
+}
+
+impl ModelType {
+    /// Get the embedding dimension for this model
+    pub fn dimension(&self) -> usize {
+        match self {
+            ModelType::MiniLM => 384,
+            ModelType::ModernBERTBase => 768,
+            ModelType::ModernBERTLarge => 1024,
+        }
+    }
+
+    /// Get the maximum sequence length for this model
+    pub fn max_sequence_length(&self) -> usize {
+        match self {
+            ModelType::MiniLM => 512,
+            ModelType::ModernBERTBase => 8192,
+            ModelType::ModernBERTLarge => 8192,
+        }
+    }
+
+    /// Get the approximate memory footprint in MB
+    pub fn memory_footprint_mb(&self) -> usize {
+        match self {
+            ModelType::MiniLM => 90,
+            ModelType::ModernBERTBase => 600,
+            ModelType::ModernBERTLarge => 1600,
+        }
+    }
+
+    /// Check if this model supports GPU acceleration
+    pub fn supports_gpu(&self) -> bool {
+        match self {
+            ModelType::MiniLM => false,
+            ModelType::ModernBERTBase | ModelType::ModernBERTLarge => true,
+        }
+    }
+
+    /// Get the HuggingFace model ID
+    pub fn huggingface_id(&self) -> &'static str {
+        match self {
+            ModelType::MiniLM => "sentence-transformers/all-MiniLM-L6-v2",
+            ModelType::ModernBERTBase => "answerdotai/ModernBERT-base",
+            ModelType::ModernBERTLarge => "answerdotai/ModernBERT-large",
+        }
+    }
 }
 
 /// Routing configuration for dynamic CPU/GPU selection (ModernBERT only)
