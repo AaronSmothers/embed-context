@@ -9,11 +9,11 @@
 use crate::embedding::Embedder;
 use crate::models::mini_lm::{MiniLMEmbedder, EmbedderStats};
 use anyhow::{anyhow, Result};
-use crossbeam::channel::{self, Sender, Receiver};
+use crossbeam::channel::{Sender, Receiver};
 use ndarray::Array1;
+use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use tokio::sync::oneshot;
 
 /// Model types supported by the pool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,18 +239,18 @@ pub enum WorkerRequest {
     /// Embed a single text
     Embed {
         text: String,
-        response_tx: oneshot::Sender<Result<Array1<f32>>>,
+        response_tx: mpsc::Sender<Result<Array1<f32>>>,
     },
 
     /// Embed multiple texts sequentially
     EmbedBatch {
         texts: Vec<String>,
-        response_tx: oneshot::Sender<Result<Vec<Array1<f32>>>>,
+        response_tx: mpsc::Sender<Result<Vec<Array1<f32>>>>,
     },
 
     /// Get this worker's statistics
     GetStats {
-        response_tx: oneshot::Sender<EmbedderStats>,
+        response_tx: mpsc::Sender<EmbedderStats>,
     },
 
     /// Clear this worker's cache
@@ -475,14 +475,14 @@ impl EmbeddingPool {
 
     /// Embed single text
     pub fn embed_text(&self, text: String) -> Result<Array1<f32>> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = mpsc::channel();
 
         self.get_worker().send(WorkerRequest::Embed {
             text,
             response_tx: tx,
         })?;
 
-        rx.blocking_recv()?
+        rx.recv()?
     }
 
     /// Embed batch (distributes across workers)
@@ -497,7 +497,7 @@ impl EmbeddingPool {
         let mut receivers = vec![];
 
         for chunk in texts.chunks(chunk_size) {
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = mpsc::channel();
 
             self.get_worker().send(WorkerRequest::EmbedBatch {
                 texts: chunk.to_vec(),
@@ -510,7 +510,7 @@ impl EmbeddingPool {
         // Collect results in order
         let mut results = Vec::with_capacity(texts.len());
         for rx in receivers {
-            let chunk_results = rx.blocking_recv()??;
+            let chunk_results = rx.recv()??;
             results.extend(chunk_results);
         }
 
@@ -522,14 +522,14 @@ impl EmbeddingPool {
         let mut receivers = vec![];
 
         for worker in &self.workers {
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = mpsc::channel();
             worker.send(WorkerRequest::GetStats { response_tx: tx })?;
             receivers.push(rx);
         }
 
         let mut total = EmbedderStats::default();
         for rx in receivers {
-            let stats = rx.blocking_recv()?;
+            let stats = rx.recv()?;
             total.embeddings_count += stats.embeddings_count;
             total.cache_hits += stats.cache_hits;
             total.cache_misses += stats.cache_misses;
@@ -548,7 +548,7 @@ impl EmbeddingPool {
     }
 
     /// Graceful shutdown of all workers
-    pub fn shutdown(self) -> Result<()> {
+    pub fn shutdown(mut self) -> Result<()> {
         log::info!("Shutting down pool ({} workers)...", self.workers.len());
 
         // Send shutdown to all workers
@@ -557,7 +557,8 @@ impl EmbeddingPool {
         }
 
         // Wait for all worker threads to finish
-        for handle in self.handles {
+        let handles = std::mem::take(&mut self.handles);
+        for handle in handles {
             handle
                 .join()
                 .map_err(|_| anyhow!("Worker panic during shutdown"))?;

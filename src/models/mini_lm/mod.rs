@@ -46,7 +46,7 @@ impl Default for MiniLMConfig {
             model_path: None,
             device: Device::Cpu,
             cache_embeddings: true,
-            cache_size_limit: 10000, // Cache up to 10K embeddings
+            cache_size_limit: 1000, // Cache up to 1K embeddings
             verify_silicon: true,
         }
     }
@@ -317,13 +317,13 @@ impl Embedder for MiniLMEmbedder {
     fn embed_text(&self, text: &str) -> Result<Array1<f32>> {
         // Clone self to get a mutable version since our methods require &mut self
         let mut embedder = self.clone();
-        embedder.embed_text(text)
+        MiniLMEmbedder::embed_text(&mut embedder, text)
     }
     
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Array1<f32>>> {
         // Clone self to get a mutable version
         let mut embedder = self.clone();
-        embedder.embed_batch(texts)
+        MiniLMEmbedder::embed_batch(&mut embedder, texts)
     }
     
     fn model_name(&self) -> &str {
@@ -346,4 +346,21 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &text[..max_len])
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::Embedder;
+
+    #[test]
+    fn trait_embed_batch_empty_is_not_recursive() {
+        let embedder = MiniLMEmbedder::new();
+
+        // Regression test: this used to recurse forever in the trait impl.
+        let empty: Vec<String> = vec![];
+        let result = Embedder::embed_batch(&embedder, &empty).unwrap();
+
+        assert!(result.is_empty());
+    }
+}
