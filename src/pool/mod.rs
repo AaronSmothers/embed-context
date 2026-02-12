@@ -274,16 +274,24 @@ impl EmbeddingWorker {
         let mut config = crate::models::mini_lm::MiniLMConfig::default();
         config.cache_size_limit = cache_size;
 
-        let mut embedder = MiniLMEmbedder::with_config(config);
-        embedder.initialize()?;
+        // IMPORTANT: model state is thread-local inside MiniLMEmbedder.
+        // The model must be initialized on the same thread that will run inference.
+        // So we only construct the embedder here, and initialize in run().
+        let embedder = MiniLMEmbedder::with_config(config);
 
-        log::info!("Worker {} initialized successfully", id);
+        log::info!("Worker {} created successfully", id);
 
         Ok(Self { id, embedder })
     }
 
     /// Main worker loop - process requests until shutdown
     fn run(mut self, rx: Receiver<WorkerRequest>) {
+        // Initialize model on the worker thread (required for thread-local model storage).
+        if let Err(e) = self.embedder.initialize() {
+            log::error!("Worker {} failed to initialize model: {}", self.id, e);
+            return;
+        }
+
         log::info!("Worker {} started and ready", self.id);
 
         for request in rx {

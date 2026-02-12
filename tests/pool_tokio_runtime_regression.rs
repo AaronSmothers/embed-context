@@ -2,7 +2,7 @@ use anyhow::Result;
 use rust_embed::{EmbeddingPool, ModelType, PoolConfig};
 
 #[tokio::test(flavor = "current_thread")]
-async fn pool_aggregate_stats_from_tokio_runtime_no_blocking_panic() -> Result<()> {
+async fn pool_embed_batch_from_tokio_runtime_initializes_worker_model() -> Result<()> {
     let config = PoolConfig {
         cpu_workers: 1,
         gpu_workers: 0,
@@ -16,10 +16,10 @@ async fn pool_aggregate_stats_from_tokio_runtime_no_blocking_panic() -> Result<(
     // Regression test: this used to panic with
     // "Cannot block the current thread from within a runtime"
     // when using tokio::oneshot::blocking_recv in pool code.
-    // aggregate_stats exercises worker request/response waiting without requiring model inference.
-    let stats = pool.aggregate_stats()?;
+    let embeddings = pool.embed_batch(vec!["runtime regression text".to_string()])?;
 
-    assert_eq!(stats.embeddings_count, 0);
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings[0].len(), 384);
 
     pool.shutdown()?;
     Ok(())
